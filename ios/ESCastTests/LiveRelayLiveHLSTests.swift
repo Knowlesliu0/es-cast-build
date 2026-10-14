@@ -7,9 +7,7 @@ import XCTest
 final class LiveRelayLiveHLSTests: XCTestCase {
     @MainActor
     func testRelayConsumesGrowingHLSBeforeWriterFinishesAndPersistsDecodedSamples() async throws {
-        let sourceURL = try XCTUnwrap(Bundle.main.url(forResource: "ESCast-Car-Test-60s",
-            withExtension: "mp4", subdirectory: "CarTestAssets"))
-        let sourceDuration = CMTimeGetSeconds(try await AVURLAsset(url: sourceURL).load(.duration))
+        let sourceDuration = SyntheticLiveMediaSource.durationSeconds
         let deadlineSeconds = 35.0
         guard sourceDuration > deadlineSeconds + 10 else {
             throw LiveRelayIntegrationFailure(message: "The real-time source must outlast the entire live observation deadline")
@@ -76,7 +74,7 @@ final class LiveRelayLiveHLSTests: XCTestCase {
                 progress.update { $0.running = true }
                 defer { progress.update { $0.running = false } }
                 do {
-                    try await Self.feedRealTime(sourceURL, into: writer, queue: queue, progress: progress)
+                    try await Self.feedRealTime(into: writer, queue: queue, progress: progress)
                     progress.update { $0.completed = true }
                 } catch is CancellationError {
                     // The observation deliberately ends before the 60-second source does.
@@ -177,8 +175,8 @@ final class LiveRelayLiveHLSTests: XCTestCase {
             let source = progress.snapshot()
             let diagnosticClockProgress = confirmed.clockProgress
             let summary: [String: Any] = [
-                "scope": "Real-time synthetic source -> production growing HLS -> actual LiveRelayModel/AVPlayer; no physical receiver",
-                "source_mode": "real_time_synthetic", "source_duration_seconds": sourceDuration,
+                "scope": "Real-time generated CVPixelBuffer/PCM -> production growing HLS -> actual LiveRelayModel/AVPlayer; no ScreenCaptureKit, Red app, or physical receiver",
+                "source_mode": "test_only_decoded_synthetic_samples", "source_duration_seconds": sourceDuration,
                 "relay_session_uuid": rows.first?["relay_session_uuid"] ?? "",
                 "capture_session_uuid": captureID.uuidString,
                 "segments_at_consumer_start": source.segmentsAtConsumerStart ?? -1,
@@ -247,97 +245,69 @@ final class LiveRelayLiveHLSTests: XCTestCase {
         }
     }
 
-    nonisolated private static func feedRealTime(_ url: URL, into writer: LiveHLSWriter, queue: DispatchQueue,
+    nonisolated private static func feedRealTime(into writer: LiveHLSWriter, queue: DispatchQueue,
                                                  progress: LiveRelayProducerProgress) async throws {
         progress.update { $0.producerObservedMainThread = $0.producerObservedMainThread || Thread.isMainThread }
-        let asset = AVURLAsset(url: url)
-        let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        guard let videoTrack = videoTracks.first, let audioTrack = audioTracks.first else {
-            throw LiveRelayIntegrationFailure(message: "The real-time fixture needs both media tracks")
+        guard SyntheticLiveMediaSource.framesPerSecond == 30,
+              SyntheticLiveMediaSource.frameCount == 1800 else {
+            throw LiveRelayIntegrationFailure(message: "The decoded synthetic source must retain 30 Hz for sixty seconds")
         }
-        let reader = try AVAssetReader(asset: asset)
-        let video = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        ])
-        let audio = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
-            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48000, AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsNonInterleaved: false
-        ])
-        video.alwaysCopiesSampleData = false; audio.alwaysCopiesSampleData = false
-        guard reader.canAdd(video), reader.canAdd(audio) else {
-            throw LiveRelayIntegrationFailure(message: "The reader cannot supply the production writer formats")
-        }
-        reader.add(video); reader.add(audio)
-        let readerStart = ProcessInfo.processInfo.systemUptime
-        guard reader.startReading() else {
-            throw reader.error ?? LiveRelayIntegrationFailure(message: "Cannot start the real-time source reader")
-        }
-        progress.recordTiming("reader_start", seconds: ProcessInfo.processInfo.systemUptime - readerStart)
-        defer { reader.cancelReading() }
-        func copyNext(_ output: AVAssetReaderTrackOutput) -> CMSampleBuffer? {
-            let began = ProcessInfo.processInfo.systemUptime
-            let result = output.copyNextSampleBuffer()
-            progress.recordTiming("reader_copy", seconds: ProcessInfo.processInfo.systemUptime - began)
-            return result
-        }
-        var nextVideo = copyNext(video)
-        var nextAudio = copyNext(audio)
-        guard nextVideo != nil, nextAudio != nil else {
-            throw LiveRelayIntegrationFailure(message: "The source did not provide its initial image and PCM")
-        }
+        let setupBegan = ProcessInfo.processInfo.systemUptime
+        let source = try SyntheticLiveMediaSource()
+        progress.recordTiming("source_setup", seconds: ProcessInfo.processInfo.systemUptime - setupBegan)
         let wallStart = ProcessInfo.processInfo.systemUptime
-        var origin: Double?
         queue.sync { writer.startMonitoring() }
-        while nextVideo != nil || nextAudio != nil {
+        for frameIndex in 0..<SyntheticLiveMediaSource.frameCount {
             progress.update { $0.producerObservedMainThread = $0.producerObservedMainThread || Thread.isMainThread }
             try Task.checkCancellation()
-            let useVideo = nextVideo != nil && (nextAudio == nil ||
-                CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(nextVideo!),
-                              CMSampleBufferGetPresentationTimeStamp(nextAudio!)) <= 0)
-            let type: AVMediaType = useVideo ? .video : .audio
-            let sample = useVideo ? nextVideo! : nextAudio!
-            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            guard pts.isFinite else { throw LiveRelayIntegrationFailure(message: "Source PTS is not finite") }
-            if origin == nil { origin = pts }
-            let remaining = pts - origin! - (ProcessInfo.processInfo.systemUptime - wallStart)
+            let commonPTS = CMTime(value: Int64(frameIndex), timescale: 30)
+            let pts = CMTimeGetSeconds(commonPTS)
+            let remaining = pts - (ProcessInfo.processInfo.systemUptime - wallStart)
             if remaining > 0 {
                 progress.recordTiming("pacing_requested", seconds: remaining)
                 let waited = ProcessInfo.processInfo.systemUptime
                 try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
                 progress.recordTiming("pacing_actual", seconds: ProcessInfo.processInfo.systemUptime - waited)
             }
-            let readinessBegan = ProcessInfo.processInfo.systemUptime
-            let readinessDeadline = ProcessInfo.processInfo.systemUptime + 1
-            while !queue.sync(execute: { writer.isReadyFor(type) }) {
-                try Task.checkCancellation()
-                guard ProcessInfo.processInfo.systemUptime < readinessDeadline else {
-                    throw LiveRelayIntegrationFailure(message: "The production encoder could not accept a real-time \(type.rawValue) sample")
+            let generated = ProcessInfo.processInfo.systemUptime
+            let (video, audio) = try source.samplePair(frameIndex: frameIndex)
+            progress.recordTiming("sample_generation", seconds: ProcessInfo.processInfo.systemUptime - generated)
+            guard CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(video), commonPTS) == 0,
+                  CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(audio), commonPTS) == 0,
+                  CMSampleBufferGetNumSamples(audio) == 1600,
+                  let audioFormat = CMSampleBufferGetFormatDescription(audio),
+                  let pcm = CMAudioFormatDescriptionGetStreamBasicDescription(audioFormat),
+                  pcm.pointee.mSampleRate == 48000, pcm.pointee.mChannelsPerFrame == 2 else {
+                throw LiveRelayIntegrationFailure(message: "Decoded source must supply shared 30 Hz PTS and 1600 PCM sample frames")
+            }
+            for (sample, type) in [(video, AVMediaType.video), (audio, AVMediaType.audio)] {
+                let readinessBegan = ProcessInfo.processInfo.systemUptime
+                let readinessDeadline = ProcessInfo.processInfo.systemUptime + 1
+                while !queue.sync(execute: { writer.isReadyFor(type) }) {
+                    try Task.checkCancellation()
+                    guard ProcessInfo.processInfo.systemUptime < readinessDeadline else {
+                        throw LiveRelayIntegrationFailure(message: "The production encoder could not accept a real-time \(type.rawValue) sample")
+                    }
+                    try await Task.sleep(nanoseconds: 1_000_000)
                 }
-                try await Task.sleep(nanoseconds: 1_000_000)
+                progress.recordTiming("readiness", seconds: ProcessInfo.processInfo.systemUptime - readinessBegan)
+                let queued = ProcessInfo.processInfo.systemUptime
+                var appendBegan = queued
+                try queue.sync {
+                    appendBegan = ProcessInfo.processInfo.systemUptime
+                    try writer.append(sample, type: type)
+                }
+                let appended = ProcessInfo.processInfo.systemUptime
+                progress.recordTiming("queue_wait", seconds: appendBegan - queued)
+                progress.recordTiming("append", seconds: appended - appendBegan)
+                progress.recordTiming("delivery_lateness", seconds: max(0, appended - wallStart - pts))
+                progress.update {
+                    $0.lastSourcePTS = pts
+                    if type == .video { $0.videoBuffers += 1 } else { $0.audioBuffers += 1 }
+                }
             }
-            progress.recordTiming("readiness", seconds: ProcessInfo.processInfo.systemUptime - readinessBegan)
-            let queued = ProcessInfo.processInfo.systemUptime
-            var appendBegan = queued
-            try queue.sync {
-                appendBegan = ProcessInfo.processInfo.systemUptime
-                try writer.append(sample, type: type)
-            }
-            let appended = ProcessInfo.processInfo.systemUptime
-            progress.recordTiming("queue_wait", seconds: appendBegan - queued)
-            progress.recordTiming("append", seconds: appended - appendBegan)
-            progress.recordTiming("delivery_lateness", seconds: max(0, appended - wallStart - (pts - origin!)))
-            progress.update {
-                $0.lastSourcePTS = pts
-                if useVideo { $0.videoBuffers += 1 } else { $0.audioBuffers += 1 }
-            }
-            if useVideo { nextVideo = copyNext(video) }
-            else { nextAudio = copyNext(audio) }
             // Remain cooperative if catching up, without changing source PTS or expected cadence.
             try await Task.sleep(nanoseconds: 100_000)
-        }
-        guard reader.status == .completed else {
-            throw reader.error ?? LiveRelayIntegrationFailure(message: "The source reader ended unexpectedly")
         }
     }
 }
