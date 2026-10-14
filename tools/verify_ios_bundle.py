@@ -56,7 +56,9 @@ def verify(path, source_recovery=False):
         fixture_exists = (path / fixture).is_file() and (path / fixture).stat().st_size > 1024
     else:
         with zipfile.ZipFile(path) as archive:
-            fixture_exists = info_path.rsplit("/", 1)[0] + "/" + fixture in archive.namelist()
+            fixture_path = info_path.rsplit("/", 1)[0] + "/" + fixture
+            fixture_exists = (fixture_path in archive.namelist()
+                              and archive.getinfo(fixture_path).file_size > 1024)
     if not fixture_exists:
         failures.append("Missing offline car test movie")
     return {"bundle_configuration_passed": not failures, "failures": failures,

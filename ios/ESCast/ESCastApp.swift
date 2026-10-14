@@ -29,7 +29,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("車機影片接收測試") {
-                    Text("先停止擷取，再匯入同步測試影片，透過系統 AirPlay 選擇接收端。")
+                    Text("先載入內建測試片，點右側 AirPlay 選擇影片接收端，再按播放。先確認車機有畫面與短音，結束後按保存播放診斷。")
                     Button("載入內建測試片", action: playback.loadCarTestMovie)
                         .disabled(capture.active || capture.busy || playback.active || relay.armed)
                     Button("匯入測試影片") { importing = true }

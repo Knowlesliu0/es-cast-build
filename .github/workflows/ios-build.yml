@@ -48,7 +48,7 @@ jobs:
       - name: Generate and verify offline car test movie
         run: |
           set -euo pipefail
-          python3 tools/make_sync_fixture.py --duration 60 --output ios/CarTestAssets/ESCast-Car-Test-60s.mp4
+          python3 tools/make_sync_fixture.py --duration 60 --no-labels --output ios/CarTestAssets/ESCast-Car-Test-60s.mp4
           python3 tools/verify_fixture.py ios/CarTestAssets/ESCast-Car-Test-60s.mp4 --pulses 2 30 58 --report offline-car-fixture.json
       - name: Build device app without signing
         run: |

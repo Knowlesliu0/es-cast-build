@@ -15,6 +15,7 @@ final class PlaybackModel: ObservableObject {
     private var timeControlObserver: NSKeyValueObservation?
     private var itemStatusObserver: NSKeyValueObservation?
     private var resumeAfterInterruption = false
+    private var ownsAudioSession = false
 
     init() {
         player.allowsExternalPlayback = true
@@ -41,9 +42,10 @@ final class PlaybackModel: ObservableObject {
                                              object: nil, queue: .main) { [weak self] notification in
             let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
             Task { @MainActor in
-                guard reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
-                self?.pause()
-                self?.status = "接收端已斷線，請重新選擇接收端後播放"
+                guard let self, self.ownsAudioSession,
+                      reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+                self.pause()
+                self.status = "接收端已斷線，請重新選擇接收端後播放"
             }
         })
         observers.append(center.addObserver(forName: AVPlayerItem.failedToPlayToEndTimeNotification,
@@ -115,6 +117,7 @@ final class PlaybackModel: ObservableObject {
             try session.setCategory(.playback, mode: .moviePlayback,
                                     policy: .longFormVideo, options: [])
             try session.setActive(true)
+            ownsAudioSession = true
             active = true
             status = "正在準備播放…"
             if let duration = player.currentItem?.duration, duration.isNumeric,
@@ -131,7 +134,10 @@ final class PlaybackModel: ObservableObject {
         resumeAfterInterruption = false
         if ready { status = "已暫停" }
         player.pause()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if ownsAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            ownsAudioSession = false
+        }
     }
 
     private func refreshPlaybackStatus() {
@@ -201,6 +207,7 @@ final class PlaybackModel: ObservableObject {
     }
 
     private func interruption(type: UInt?, options: UInt) {
+        guard ownsAudioSession else { return }
         if type == AVAudioSession.InterruptionType.began.rawValue {
             resumeAfterInterruption = active
             player.pause()
