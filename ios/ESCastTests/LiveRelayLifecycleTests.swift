@@ -153,4 +153,135 @@ final class LiveRelayLifecycleTests: XCTestCase {
         XCTAssertEqual(rows.last?["vehicle_playback_verified"] as? Bool, false)
         XCTAssertEqual(rows.last?["audible_output_verified"] as? Bool, false)
     }
+
+    @MainActor
+    func testMatchingBackgroundRateNotificationIsSavedWithoutChangingTheArm() async throws {
+        let model = LiveRelayModel()
+        XCTAssertTrue(model.prepare(), model.status)
+        defer { model.stop(reason: "test_cleanup") }
+        let current = AVPlayerItem(asset: AVMutableComposition())
+        model.player.replaceCurrentItem(with: current)
+        let expectedRate = model.player.rate
+        let originalStatus = model.status
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason.appBackgrounded])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(model.armed)
+        XCTAssertFalse(model.active)
+        XCTAssertTrue(model.player.currentItem === current)
+        XCTAssertTrue(model.player.isMuted)
+        XCTAssertEqual(model.player.rate, expectedRate)
+        XCTAssertEqual(model.status, originalStatus)
+        model.stop(reason: "user")
+        let rows = try closedDiagnosticRows(model)
+        let backgroundRows = rows.filter {
+            $0["event"] as? String == "rate_changed"
+                && $0["notification_reason_raw"] as? String == AVPlayer.RateDidChangeReason.appBackgrounded.rawValue
+        }
+        XCTAssertEqual(backgroundRows.count, 1, "The matching AVPlayer notification must survive in the closed diagnostic")
+        guard let row = backgroundRows.first else { return }
+        XCTAssertEqual(row["notification_reason_name"] as? String, "appBackgrounded")
+        XCTAssertEqual((row["notification_player_rate"] as? NSNumber)?.floatValue, expectedRate)
+        XCTAssertEqual(row["consumer_muted"] as? Bool, true)
+        XCTAssertEqual(row["armed"] as? Bool, true)
+        XCTAssertEqual(row["vehicle_playback_verified"] as? Bool, false)
+        XCTAssertEqual(row["audible_output_verified"] as? Bool, false)
+        XCTAssertEqual(rows.first?["event"] as? String, "prepared")
+        XCTAssertEqual(rows.last?["event"] as? String, "stop")
+        XCTAssertEqual(rows.last?["reason"] as? String, "user")
+    }
+
+    @MainActor
+    func testRateDiagnosticPreservesUnknownReasonAndDistinguishesMissingReason() async throws {
+        let model = LiveRelayModel()
+        XCTAssertTrue(model.prepare(), model.status)
+        defer { model.stop(reason: "test_cleanup") }
+        let unknownRaw = "ESCastTests.futureRateReason"
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason(rawValue: unknownRaw)])
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(model.armed)
+        XCTAssertFalse(model.active)
+        XCTAssertNil(model.player.currentItem)
+        XCTAssertTrue(model.player.isMuted)
+        XCTAssertEqual(model.player.rate, 0)
+        model.stop(reason: "user")
+        let rows = try closedDiagnosticRows(model).filter { $0["event"] as? String == "rate_changed" }
+        let unknownRows = rows.filter { $0["notification_reason_raw"] as? String == unknownRaw }
+        XCTAssertEqual(unknownRows.count, 1, "Unrecognized Apple reason values must remain inspectable")
+        XCTAssertEqual(unknownRows.first?["notification_reason_name"] as? String, "unknown")
+        let missingRows = rows.filter { $0["notification_reason_name"] as? String == "missing" }
+        XCTAssertEqual(missingRows.count, 1, "A notification without reason must not be silently discarded")
+        XCTAssertTrue(missingRows.first?["notification_reason_raw"] is NSNull)
+    }
+
+    @MainActor
+    func testOtherPlayersRateNotificationCannotPolluteThisRunsDiagnostic() async throws {
+        let model = LiveRelayModel()
+        XCTAssertTrue(model.prepare(), model.status)
+        defer { model.stop(reason: "test_cleanup") }
+        let current = AVPlayerItem(asset: AVMutableComposition())
+        model.player.replaceCurrentItem(with: current)
+        let otherPlayer = AVPlayer()
+        let foreignRaw = "ESCastTests.foreignPlayerRate"
+        let matchingRaw = "ESCastTests.matchingPlayerRate"
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: otherPlayer,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason(rawValue: foreignRaw)])
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason(rawValue: matchingRaw)])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(model.armed)
+        XCTAssertFalse(model.active)
+        XCTAssertTrue(model.player.currentItem === current)
+        XCTAssertTrue(model.player.isMuted)
+        XCTAssertEqual(model.player.rate, 0)
+        model.stop(reason: "user")
+        let rows = try closedDiagnosticRows(model).filter { $0["event"] as? String == "rate_changed" }
+        XCTAssertFalse(rows.contains { $0["notification_reason_raw"] as? String == foreignRaw })
+        XCTAssertEqual(rows.filter { $0["notification_reason_raw"] as? String == matchingRaw }.count, 1,
+                       "The positive control proves the observer did not simply ignore every player")
+    }
+
+    @MainActor
+    func testQueuedRateNotificationFromPreviousArmCannotPolluteRearmedRun() async throws {
+        let model = LiveRelayModel()
+        XCTAssertTrue(model.prepare(), model.status)
+        let previousRaw = "ESCastTests.previousGenerationRate"
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason(rawValue: previousRaw)])
+        // Re-arm before the notification's MainActor task can run. The AVPlayer identity is unchanged.
+        XCTAssertTrue(model.prepare(), model.status)
+        defer { model.stop(reason: "test_cleanup") }
+        let current = AVPlayerItem(asset: AVMutableComposition())
+        model.player.replaceCurrentItem(with: current)
+        let currentRaw = "ESCastTests.currentGenerationRate"
+        NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: model.player,
+                                        userInfo: [AVPlayer.rateDidChangeReasonKey:
+                                                    AVPlayer.RateDidChangeReason(rawValue: currentRaw)])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(model.armed)
+        XCTAssertFalse(model.active)
+        XCTAssertTrue(model.player.currentItem === current)
+        XCTAssertTrue(model.player.isMuted)
+        XCTAssertEqual(model.player.rate, 0)
+        model.stop(reason: "user")
+        let rows = try closedDiagnosticRows(model).filter { $0["event"] as? String == "rate_changed" }
+        XCTAssertFalse(rows.contains { $0["notification_reason_raw"] as? String == previousRaw })
+        XCTAssertEqual(rows.filter { $0["notification_reason_raw"] as? String == currentRaw }.count, 1,
+                       "The new arm must still accept a matching notification")
+    }
+
+    @MainActor
+    private func closedDiagnosticRows(_ model: LiveRelayModel) throws -> [[String: Any]] {
+        let log = try String(contentsOf: XCTUnwrap(model.logURL), encoding: .utf8)
+        return try log.split(separator: "\n").map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+    }
 }

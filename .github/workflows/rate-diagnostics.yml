@@ -1,0 +1,61 @@
+name: Validate relay rate-change diagnostics
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/rate-diagnostics.yml'
+      - 'ios/ESCast/LiveRelayModel.swift'
+      - 'ios/ESCastTests/LiveRelayLifecycleTests.swift'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode with iOS 27 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in /Applications/Xcode*.app; do
+            sdk=$(DEVELOPER_DIR="$candidate/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+            if [[ "$sdk" == 27.* ]]; then
+              echo "DEVELOPER_DIR=$candidate/Contents/Developer" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo 'No iOS 27 SDK found.' >&2
+          exit 1
+      - name: Generate project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+      - name: Run relay lifecycle and notification diagnostics
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > simulator-devices.json
+          simulator_id=$(python3 -c 'import json; d=json.load(open("simulator-devices.json")); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS-27" in k for v in vs if "iPhone" in v["name"]))')
+          xcodebuild -project ios/ESCast.xcodeproj -scheme PlaybackRegression \
+            -destination "platform=iOS Simulator,id=$simulator_id" -destination-timeout 180 \
+            -configuration Debug -derivedDataPath ios/rate-diagnostics-build \
+            -parallel-testing-enabled NO -resultBundlePath ios/RateDiagnostics.xcresult \
+            -only-testing:ESCastTests/LiveRelayLifecycleTests \
+            -collect-test-diagnostics never CODE_SIGNING_ALLOWED=NO test | tee rate-diagnostics.log
+      - name: Export test summary
+        if: always()
+        run: |
+          if [[ -d ios/RateDiagnostics.xcresult ]]; then
+            xcrun xcresulttool get test-results summary --path ios/RateDiagnostics.xcresult > rate-test-summary.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RateDiagnostics-evidence
+          path: |
+            rate-diagnostics.log
+            rate-test-summary.json
+            ios/RateDiagnostics.xcresult
+          retention-days: 7
