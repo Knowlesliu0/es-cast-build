@@ -1,6 +1,5 @@
 import AVFoundation
 import Combine
-import CoreFoundation
 import UIKit
 import XCTest
 @testable import ESCastTestHost

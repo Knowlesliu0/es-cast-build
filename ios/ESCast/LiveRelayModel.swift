@@ -86,12 +86,15 @@ final class LiveRelayModel: ObservableObject {
             status = "已準備；選擇接收端，再開始螢幕分享。沒有外部影片接收端時只做靜音探測。"
             observeRun(generation: expectedGeneration)
             guard append(event: "prepared") else { return false }
-            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            let snapshotTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, self.armed, self.generation == expectedGeneration else { return }
                     self.snapshot()
                 }
             }
+            // UI tracking must not suppress diagnostic ticks while the user scrolls.
+            RunLoop.main.add(snapshotTimer, forMode: .common)
+            timer = snapshotTimer
             return true
         } catch {
             let native = error as NSError
