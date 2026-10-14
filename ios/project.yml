@@ -1,0 +1,94 @@
+name: ESCast
+options:
+  bundleIdPrefix: tw.escast
+  deploymentTarget:
+    iOS: '27.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    SWIFT_STRICT_CONCURRENCY: targeted
+    TARGETED_DEVICE_FAMILY: '1'
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 10
+    MARKETING_VERSION: 0.1.0
+    ESCAST_DISPLAY_NAME: ES Cast 驗證版
+    ESCAST_SOURCE_RECOVERY: NO
+targets:
+  ESCast:
+    type: application
+    platform: iOS
+    sources:
+      - path: ESCast
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tw.escast.probe
+        INFOPLIST_FILE: ESCast/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: '1'
+  ESCastSourceRecovery:
+    type: application
+    platform: iOS
+    sources:
+      - path: ESCast
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tw.escast.source-recovery
+        TARGETED_DEVICE_FAMILY: '1'
+        INFOPLIST_FILE: ESCast/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CURRENT_PROJECT_VERSION: 10
+        ESCAST_DISPLAY_NAME: ES Cast 來源觀察
+        ESCAST_SOURCE_RECOVERY: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SOURCE_RECOVERY_OBSERVATION
+  ESCastTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - ESCastTestHost
+      - ESCast/PlaybackModel.swift
+      - ESCast/HLS
+      - ESCast/LiveHLSWriter.swift
+      - ESCast/LocalHLSServer.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tw.escast.playback-test-host
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        TARGETED_DEVICE_FAMILY: '1'
+  ESCastTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ESCastTests
+        excludes:
+          - Fixtures
+      - path: ESCastTests/Fixtures
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: ESCastTestHost
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: '1'
+schemes:
+  ESCast:
+    build:
+      targets:
+        ESCast: all
+  ESCastSourceRecovery:
+    build:
+      targets:
+        ESCastSourceRecovery: all
+  PlaybackRegression:
+    build:
+      targets:
+        ESCastTestHost: all
+    test:
+      targets:
+        - ESCastTests

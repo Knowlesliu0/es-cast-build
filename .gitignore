@@ -1,0 +1,12 @@
+artifacts/
+ios/build/
+ios/simulator-build/
+ios/*.xcresult/
+ios/*.xcodeproj/
+ios/ESCastTests/Fixtures/hls-native-source.mp4
+__pycache__/
+*.pyc
+*.ipa
+*.p12
+*.mobileprovision
+.DS_Store

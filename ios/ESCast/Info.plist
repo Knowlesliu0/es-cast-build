@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDisplayName</key><string>$(ESCAST_DISPLAY_NAME)</string>
+  <key>ESCastSourceRecoveryObservation</key><string>$(ESCAST_SOURCE_RECOVERY)</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>LSRequiresIPhoneOS</key><true/>
+  <key>UILaunchScreen</key><dict/>
+  <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+  <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+  <key>UIBackgroundModes</key><array><string>screen-capture</string><string>audio</string></array>
+  <key>AVInitialRouteSharingPolicy</key><string>LongFormVideo</string>
+  <key>NSScreenCaptureUsageDescription</key><string>經你同意後測試其他 App 的影音擷取能力，供停車影音投放開發使用。</string>
+  <key>NSLocalNetworkUsageDescription</key><string>尋找你選擇的 AirPlay 影音接收裝置。</string>
+</dict></plist>

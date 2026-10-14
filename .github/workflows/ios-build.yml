@@ -1,0 +1,119 @@
+name: Build unsigned ES Cast probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    # Xcode 27 is provided on this dedicated image, not on macos-26.
+    # https://github.com/actions/runner-images/issues/14404
+    runs-on: xcode-27
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate capture log analyzer
+        run: python3 -m unittest discover -s tests -v
+      - name: Select an installed Xcode with iOS 27 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee environment.log) 2>&1
+          selected=""
+          for candidate in /Applications/Xcode*.app; do
+            sdk=$(DEVELOPER_DIR="$candidate/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+            echo "$candidate: iOS SDK $sdk"
+            if [[ "$sdk" == 27.* ]]; then selected="$candidate/Contents/Developer"; break; fi
+          done
+          if [[ -z "$selected" ]]; then
+            echo 'No iOS 27 SDK found. This build cannot proceed.' >&2
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$selected" >> "$GITHUB_ENV"
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+      - name: Validate live HLS encoding and loopback
+        run: bash tools/run_hls_native_tests.sh
+      - name: Build device app without signing
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcodebuild -project ios/ESCast.xcodeproj -scheme ESCast \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -configuration Debug -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO build | tee ios-build.log
+      - name: Validate packaged app configuration
+        run: |
+          set -euo pipefail
+          python3 tools/verify_ios_bundle.py ios/build/Build/Products/Debug-iphoneos/ESCast.app | tee bundle-verification.json
+      - name: Build isolated source recovery observation app
+        run: |
+          set -euo pipefail
+          xcodebuild -project ios/ESCast.xcodeproj -scheme ESCastSourceRecovery \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -configuration Debug -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO build | tee ios-recovery-build.log
+          python3 tools/verify_ios_bundle.py ios/build/Build/Products/Debug-iphoneos/ESCastSourceRecovery.app --source-recovery | tee recovery-bundle-verification.json
+          xcodebuild -project ios/ESCast.xcodeproj -scheme ESCast -configuration Debug -showBuildSettings -json > formal-settings.json
+          xcodebuild -project ios/ESCast.xcodeproj -scheme ESCastSourceRecovery -configuration Debug -showBuildSettings -json > recovery-settings.json
+          python3 - <<'PY'
+          import json
+          for path, target, enabled in [("formal-settings.json", "ESCast", False), ("recovery-settings.json", "ESCastSourceRecovery", True)]:
+              settings = next(row["buildSettings"] for row in json.load(open(path)) if row["target"] == target)
+              flags = settings.get("SWIFT_ACTIVE_COMPILATION_CONDITIONS", "").split()
+              assert ("SOURCE_RECOVERY_OBSERVATION" in flags) == enabled, (target, flags)
+          PY
+      - name: Run native playback regression tests
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > simulator-devices.json
+          simulator_id=$(python3 -c 'import json; d=json.load(open("simulator-devices.json")); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS-27" in k for v in vs if "iPhone" in v["name"]))')
+          xcodebuild -project ios/ESCast.xcodeproj -scheme PlaybackRegression \
+            -destination "platform=iOS Simulator,id=$simulator_id" -destination-timeout 180 \
+            -configuration Debug -derivedDataPath ios/simulator-build \
+            -parallel-testing-enabled NO -resultBundlePath ios/TestResults.xcresult \
+            -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=NO test | tee ios-tests.log
+      - name: Export native test summary
+        if: always()
+        run: |
+          if [[ -d ios/TestResults.xcresult ]]; then
+            xcrun xcresulttool get test-results summary --path ios/TestResults.xcresult > native-test-summary.json
+          fi
+      - name: Package unsigned app
+        run: |
+          mkdir -p artifact/Payload
+          cp -R ios/build/Build/Products/Debug-iphoneos/ESCast.app artifact/Payload/
+          echo 'UNSIGNED: requires valid Apple signing and provisioning before installation.' > artifact/UNSIGNED.txt
+          cd artifact
+          zip -qr ESCast-UNSIGNED.ipa Payload
+          mkdir -p recovery/Payload
+          cp -R ../ios/build/Build/Products/Debug-iphoneos/ESCastSourceRecovery.app recovery/Payload/
+          cd recovery
+          zip -qr ESCastSourceRecovery-UNSIGNED.ipa Payload
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ESCast-UNSIGNED
+          path: |
+            artifact/ESCast-UNSIGNED.ipa
+            artifact/recovery/ESCastSourceRecovery-UNSIGNED.ipa
+            artifact/UNSIGNED.txt
+            ios-build.log
+            environment.log
+            bundle-verification.json
+            recovery-bundle-verification.json
+            ios-recovery-build.log
+            formal-settings.json
+            recovery-settings.json
+            ios-tests.log
+            native-test-summary.json
+            ios/TestResults.xcresult
+            artifacts/hls-native-*
+          retention-days: 7
