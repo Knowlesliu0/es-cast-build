@@ -24,6 +24,8 @@ struct ContentView: View {
 #endif
                     Text("車機影片與即時投放測試")
                         .font(.headline)
+                    Text("測試版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未確認")")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("先測車機能否接收影片，再測紅果即時投放。可保持勿擾與駕駛專注模式關閉；結果會保存在手機，車上不需要電腦。")
                     Text("影片測試請在停車時進行。")
                         .foregroundStyle(.secondary)
@@ -72,7 +74,7 @@ struct ContentView: View {
                         .disabled(!relay.armed || capture.active || capture.busy)
                     Button("取消投放準備") { relay.stop(reason: "user_cancelled") }
                         .disabled(!relay.armed || capture.active || capture.busy)
-                    Text("準備後先選擇影片接收端，再開始全螢幕分享、收起系統視窗並切到紅果。沒有外部影片接收端時，轉送播放器會保持靜音，只測手機串流。")
+                    Text("準備後先選擇影片接收端，再開始全螢幕分享並收起系統視窗。先留在此頁，等上方顯示「播放中」再切到紅果；若約 20 秒仍未播放，請停止擷取並保留結果。沒有外部影片接收端時，只做靜音串流測試。")
                         .font(.caption).foregroundStyle(.secondary)
                     if let url = relay.logURL { ShareLink("匯出即時投放診斷", item: url) }
                 }

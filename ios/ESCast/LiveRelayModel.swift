@@ -200,6 +200,30 @@ final class LiveRelayModel: ObservableObject {
             }
         })
         let center = NotificationCenter.default
+        notifications.append(center.addObserver(forName: AVPlayer.rateDidChangeNotification,
+                                                 object: player, queue: .main) { [weak self] notification in
+            guard let changedPlayer = notification.object as? AVPlayer else { return }
+            let value = notification.userInfo?[AVPlayer.rateDidChangeReasonKey]
+            let reasonRaw = (value as? AVPlayer.RateDidChangeReason)?.rawValue ?? (value as? String)
+            let reasonNames = [
+                AVPlayer.RateDidChangeReason.appBackgrounded.rawValue: "appBackgrounded",
+                AVPlayer.RateDidChangeReason.audioSessionInterrupted.rawValue: "audioSessionInterrupted",
+                AVPlayer.RateDidChangeReason.setRateCalled.rawValue: "setRateCalled",
+                AVPlayer.RateDidChangeReason.setRateFailed.rawValue: "setRateFailed"
+            ]
+            let reasonName = reasonRaw.flatMap { reasonNames[$0] } ?? (reasonRaw == nil ? "missing" : "unknown")
+            // Capture at delivery; the player rate may change before the MainActor log task runs.
+            let notificationRate = changedPlayer.rate
+            Task { @MainActor in
+                guard let self, self.armed, self.generation == expectedGeneration,
+                      self.player === changedPlayer else { return }
+                _ = self.append(event: "rate_changed", details: [
+                    "notification_reason_raw": reasonRaw.map { $0 as Any } ?? NSNull(),
+                    "notification_reason_name": reasonName,
+                    "notification_player_rate": notificationRate
+                ])
+            }
+        })
         for (name, reason) in [(AVPlayerItem.failedToPlayToEndTimeNotification, "item_failed_to_end"),
                                (AVPlayerItem.didPlayToEndTimeNotification, "live_item_ended")] {
             notifications.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
@@ -327,6 +351,7 @@ final class LiveRelayModel: ObservableObject {
             "consumer_audio_mode": player.isMuted ? "muted_phone_probe" : "external_audio_requested",
             "audio_category": audio.category.rawValue, "audio_mode": audio.mode.rawValue,
             "route_sharing_policy": audio.routeSharingPolicy.rawValue,
+            "background_playback_policy": player.audiovisualBackgroundPlaybackPolicy.rawValue,
             "category_options": audio.categoryOptions.rawValue,
             "audio_output_port_types": audio.currentRoute.outputs.map { $0.portType.rawValue },
             "decoded_pixel_observations": decodedObservations, "decoded_brightness_changes": brightnessChanges,
