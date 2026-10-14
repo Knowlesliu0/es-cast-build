@@ -1,5 +1,7 @@
 import AVFoundation
 import Combine
+import CoreFoundation
+import UIKit
 import XCTest
 @testable import ESCastTestHost
 
@@ -95,6 +97,31 @@ final class LiveRelayLifecycleTests: XCTestCase {
         XCTAssertNil(model.logURL)
         model.stop(reason: "user")
         XCTAssertNotNil(model.logURL)
+    }
+
+    @MainActor
+    func testDiagnosticSamplesContinueDuringTrackingWithoutStartingPlayback() async throws {
+        let model = LiveRelayModel()
+        XCTAssertTrue(model.prepare(), model.status)
+        defer { model.stop(reason: "test_cleanup") }
+        let ticks = pumpTrackingMode(for: 3.2)
+        XCTAssertGreaterThanOrEqual(ticks.common, 20, "The tracking loop must actually process timers")
+        XCTAssertEqual(ticks.defaultOnly, 0, "The probe must not fall back to the default mode")
+        // Drain any MainActor tasks posted by timers during the nested tracking loop.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(model.armed)
+        XCTAssertFalse(model.active)
+        XCTAssertNil(model.player.currentItem)
+        XCTAssertTrue(model.player.isMuted)
+        XCTAssertEqual(model.player.rate, 0)
+        model.stop(reason: "user")
+        let rows = try closedDiagnosticRows(model)
+        let samples = rows.filter { $0["event"] as? String == "sample" }
+        XCTAssertGreaterThanOrEqual(samples.count, 3,
+                                   "Interface tracking must not suppress the relay's one-second diagnostic samples")
+        XCTAssertEqual(rows.last?["event"] as? String, "stop")
+        XCTAssertEqual(rows.last?["reason"] as? String, "user")
+        XCTAssertFalse(samples.contains { $0["vehicle_playback_verified"] as? Bool == true })
     }
 
     @MainActor
@@ -283,5 +310,32 @@ final class LiveRelayLifecycleTests: XCTestCase {
         return try log.split(separator: "\n").map {
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
         }
+    }
+
+    @MainActor
+    private func pumpTrackingMode(for duration: TimeInterval) -> (common: Int, defaultOnly: Int) {
+        let counter = TrackingTimerCounter()
+        let common = Timer(timeInterval: 0.1, repeats: true) { _ in counter.incrementCommon() }
+        let defaultOnly = Timer(timeInterval: 0.1, repeats: true) { _ in counter.incrementDefault() }
+        RunLoop.main.add(common, forMode: .common)
+        RunLoop.main.add(defaultOnly, forMode: .default)
+        defer { common.invalidate(); defaultOnly.invalidate() }
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            _ = RunLoop.main.run(mode: .tracking, before: deadline)
+        }
+        return counter.read()
+    }
+}
+
+/// Test-only probes; locking keeps Foundation's Sendable timer closures explicit.
+private final class TrackingTimerCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var common = 0
+    private var defaultOnly = 0
+    func incrementCommon() { lock.lock(); defer { lock.unlock() }; common += 1 }
+    func incrementDefault() { lock.lock(); defer { lock.unlock() }; defaultOnly += 1 }
+    func read() -> (common: Int, defaultOnly: Int) {
+        lock.lock(); defer { lock.unlock() }; return (common, defaultOnly)
     }
 }
