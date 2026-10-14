@@ -103,7 +103,17 @@ final class LiveRelayLifecycleTests: XCTestCase {
         let model = LiveRelayModel()
         XCTAssertTrue(model.prepare(), model.status)
         defer { model.stop(reason: "test_cleanup") }
-        let ticks = pumpTrackingMode(for: 3.2)
+        let ticks = await withCheckedContinuation { continuation in
+            // Enter from a run-loop callback after yielding this MainActor task, so
+            // the nested tracking loop can service the model's MainActor jobs.
+            let entry = Timer(timeInterval: 0.01, repeats: false) { _ in
+                let result = MainActor.assumeIsolated {
+                    Self.pumpTrackingMode(for: 3.2)
+                }
+                continuation.resume(returning: result)
+            }
+            RunLoop.main.add(entry, forMode: .common)
+        }
         XCTAssertGreaterThanOrEqual(ticks.common, 20, "The tracking loop must actually process timers")
         XCTAssertEqual(ticks.defaultOnly, 0, "The probe must not fall back to the default mode")
         // Drain any MainActor tasks posted by timers during the nested tracking loop.
@@ -115,9 +125,18 @@ final class LiveRelayLifecycleTests: XCTestCase {
         XCTAssertEqual(model.player.rate, 0)
         model.stop(reason: "user")
         let rows = try closedDiagnosticRows(model)
-        let samples = rows.filter { $0["event"] as? String == "sample" }
+        let samples = rows.filter {
+            guard $0["event"] as? String == "sample", let uptime = $0["uptime_seconds"] as? Double else { return false }
+            return uptime >= ticks.started && uptime < ticks.finished
+        }
         XCTAssertGreaterThanOrEqual(samples.count, 3,
-                                   "Interface tracking must not suppress the relay's one-second diagnostic samples")
+                                   "Diagnostic samples must be written during tracking, not queued until after it")
+        let sampleTimes = samples.compactMap { $0["uptime_seconds"] as? Double }
+        if let first = sampleTimes.first, let last = sampleTimes.last, sampleTimes.count >= 3 {
+            XCTAssertGreaterThanOrEqual(last - first, 1.5, "Three queued writes are not three seconds of observation")
+            XCTAssertFalse(zip(sampleTimes, sampleTimes.dropFirst()).contains { $1 - $0 > 3 },
+                           "The existing three-second observation threshold must remain intact")
+        }
         XCTAssertEqual(rows.last?["event"] as? String, "stop")
         XCTAssertEqual(rows.last?["reason"] as? String, "user")
         XCTAssertFalse(samples.contains { $0["vehicle_playback_verified"] as? Bool == true })
@@ -312,18 +331,21 @@ final class LiveRelayLifecycleTests: XCTestCase {
     }
 
     @MainActor
-    private func pumpTrackingMode(for duration: TimeInterval) -> (common: Int, defaultOnly: Int) {
+    private static func pumpTrackingMode(for duration: TimeInterval)
+        -> (common: Int, defaultOnly: Int, started: Double, finished: Double) {
         let counter = TrackingTimerCounter()
         let common = Timer(timeInterval: 0.1, repeats: true) { _ in counter.incrementCommon() }
         let defaultOnly = Timer(timeInterval: 0.1, repeats: true) { _ in counter.incrementDefault() }
         RunLoop.main.add(common, forMode: .common)
         RunLoop.main.add(defaultOnly, forMode: .default)
         defer { common.invalidate(); defaultOnly.invalidate() }
+        let started = ProcessInfo.processInfo.systemUptime
         let deadline = Date().addingTimeInterval(duration)
         while Date() < deadline {
             _ = RunLoop.main.run(mode: .tracking, before: deadline)
         }
-        return counter.read()
+        let ticks = counter.read()
+        return (ticks.common, ticks.defaultOnly, started, ProcessInfo.processInfo.systemUptime)
     }
 }
 
