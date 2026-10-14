@@ -1,0 +1,78 @@
+name: Validate live relay while HLS is producing
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode with iOS 27 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in /Applications/Xcode*.app; do
+            sdk=$(DEVELOPER_DIR="$candidate/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+            if [[ "$sdk" == 27.* ]]; then
+              echo "DEVELOPER_DIR=$candidate/Contents/Developer" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo 'No iOS 27 SDK found.' >&2
+          exit 1
+      - name: Generate the synthetic source and project
+        run: |
+          set -euo pipefail
+          command -v ffmpeg || brew install ffmpeg
+          brew install xcodegen
+          python3 tools/make_sync_fixture.py --duration 60 --no-labels --output ios/CarTestAssets/ESCast-Car-Test-60s.mp4
+          python3 tools/verify_fixture.py ios/CarTestAssets/ESCast-Car-Test-60s.mp4 --pulses 2 30 58 --report source-fixture-verification.json
+          cd ios
+          xcodegen generate
+      - name: Run the live producer and real relay integration
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available -j > simulator-devices.json
+          simulator_id=$(python3 -c 'import json; d=json.load(open("simulator-devices.json")); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS-27" in k for v in vs if "iPhone" in v["name"]))')
+          echo "TEST_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          xcodebuild -project ios/ESCast.xcodeproj -scheme PlaybackRegression \
+            -destination "platform=iOS Simulator,id=$simulator_id" -destination-timeout 180 \
+            -configuration Debug -derivedDataPath ios/live-relay-build \
+            -parallel-testing-enabled NO -resultBundlePath ios/LiveRelayResults.xcresult \
+            -only-testing:ESCastTests/LiveRelayLiveHLSTests \
+            -collect-test-diagnostics never CODE_SIGNING_ALLOWED=NO test | tee live-relay-integration.log
+      - name: Export integration test summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -d ios/LiveRelayResults.xcresult ]]; then
+            xcrun xcresulttool get test-results summary --path ios/LiveRelayResults.xcresult > live-relay-test-summary.json
+          fi
+      - name: Save the completed simulator relay diagnostic
+        if: ${{ always() && env.TEST_SIMULATOR_ID != '' }}
+        run: |
+          set -euo pipefail
+          app_data=$(xcrun simctl get_app_container "$TEST_SIMULATOR_ID" tw.escast.playback-test-host data)
+          mkdir -p live-relay-evidence
+          copied=0
+          for diagnostic in "$app_data"/Documents/LiveRelayDiagnostics/*.jsonl; do
+            [[ -f "$diagnostic" ]] || continue
+            name=$(basename "$diagnostic")
+            cp "$diagnostic" "live-relay-evidence/$name"
+            python3 tools/analyze_live_relay.py "live-relay-evidence/$name" --min-seconds 5 > "live-relay-evidence/$name.analysis.json"
+            copied=$((copied + 1))
+          done
+          [[ "$copied" -eq 1 ]] || { echo "Expected exactly one fresh simulated relay diagnostic, found $copied" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: LiveRelay-live-integration-evidence
+          path: |
+            live-relay-integration.log
+            live-relay-test-summary.json
+            source-fixture-verification.json
+            live-relay-evidence
+            ios/LiveRelayResults.xcresult
+          retention-days: 7
