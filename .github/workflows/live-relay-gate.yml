@@ -1,0 +1,16 @@
+name: Verify live relay lifecycle
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    runs-on: xcode-27
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run capture lifecycle transitions
+        run: |
+          set -euo pipefail
+          swiftc ios/ESCast/LiveRelayCaptureGate.swift tests/live-relay-state/main.swift -o "$RUNNER_TEMP/live-relay-state"
+          "$RUNNER_TEMP/live-relay-state"
