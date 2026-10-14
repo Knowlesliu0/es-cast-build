@@ -250,8 +250,27 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
         if type == .audio, let previous = lastAudio, CMTimeCompare(pts, previous) <= 0 {
             throw error("音訊時間倒退或重複", code: 13)
         }
-        guard let input = type == .video ? videoInput : audioInput, input.isReadyForMoreMediaData else {
-            throw error("即時編碼無法及時接收影音", code: 14)
+        let input = type == .video ? videoInput : audioInput
+        let selectedReady = input?.isReadyForMoreMediaData
+        guard let input, selectedReady == true else {
+            let now = DispatchTime.now().uptimeNanoseconds
+            func age(_ arrival: DispatchTime?) -> Any {
+                guard let arrival else { return NSNull() }
+                return Double(now - arrival.uptimeNanoseconds) / 1_000_000_000
+            }
+            let seconds = CMTimeGetSeconds(pts)
+            let videoReady = type == .video ? selectedReady : videoInput?.isReadyForMoreMediaData
+            let audioReady = type == .audio ? selectedReady : audioInput?.isReadyForMoreMediaData
+            throw NSError(domain: "ESCast.HLS", code: 14, userInfo: [
+                NSLocalizedDescriptionKey: "即時編碼無法及時接收影音",
+                "backpressure_input": type == .video ? (isHeld ? "held_video" : "source_video") : "audio",
+                "backpressure_pts_seconds": seconds.isFinite ? seconds : NSNull(),
+                "backpressure_video_ready": videoReady.map { $0 as Any } ?? NSNull(),
+                "backpressure_audio_ready": audioReady.map { $0 as Any } ?? NSNull(),
+                "backpressure_video_arrival_age_seconds": age(lastVideoArrival),
+                "backpressure_audio_arrival_age_seconds": age(lastAudioArrival),
+                "backpressure_uptime_seconds": ProcessInfo.processInfo.systemUptime
+            ])
         }
         let shifted = try retime(sample)
         guard input.append(shifted) else { throw writer.error ?? error("無法寫入影音樣本") }
@@ -378,6 +397,13 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
                 let native = error as NSError
                 result["error_domain"] = native.domain; result["error_code"] = native.code
                 result["error_message"] = native.localizedDescription
+                if native.domain == "ESCast.HLS", native.code == 14 {
+                    for key in ["backpressure_input", "backpressure_pts_seconds", "backpressure_video_ready",
+                                "backpressure_audio_ready", "backpressure_video_arrival_age_seconds",
+                                "backpressure_audio_arrival_age_seconds", "backpressure_uptime_seconds"] {
+                        if let value = native.userInfo[key] { result[key] = value }
+                    }
+                }
             }
             return result
         }
