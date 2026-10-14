@@ -12,14 +12,23 @@ final class PlaybackModel: ObservableObject {
     private var importedURL: URL?
     private var observers: [NSObjectProtocol] = []
     private var externalObserver: NSKeyValueObservation?
+    private var timeControlObserver: NSKeyValueObservation?
+    private var itemStatusObserver: NSKeyValueObservation?
     private var resumeAfterInterruption = false
 
     init() {
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = true
-        externalObserver = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { [weak self] player, _ in
-            let external = player.isExternalPlaybackActive
-            Task { @MainActor in self?.externalPlayback = external }
+        externalObserver = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.externalPlayback = self.player.isExternalPlaybackActive
+                self.refreshPlaybackStatus()
+            }
+        }
+        timeControlObserver = player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+            // Read the latest state after the actor hop, not the queued callback's value.
+            Task { @MainActor in self?.refreshPlaybackStatus() }
         }
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification,
@@ -52,7 +61,8 @@ final class PlaybackModel: ObservableObject {
                                              object: nil, queue: .main) { [weak self] notification in
             let item = notification.object as? AVPlayerItem
             Task { @MainActor in
-                guard let self, let item, self.player.currentItem === item else { return }
+                guard let self, let item, self.player.currentItem === item,
+                      self.player.timeControlStatus == .paused else { return }
                 self.active = false
                 self.status = "測試影片已播完，請核對實際車機紀錄"
             }
@@ -69,7 +79,15 @@ final class PlaybackModel: ObservableObject {
             let destination = folder.appending(path: UUID().uuidString).appendingPathExtension(source.pathExtension)
             try FileManager.default.copyItem(at: source, to: destination)
             pause()
-            player.replaceCurrentItem(with: AVPlayerItem(url: destination))
+            itemStatusObserver?.invalidate()
+            let item = AVPlayerItem(url: destination)
+            player.replaceCurrentItem(with: item)
+            itemStatusObserver = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                Task { @MainActor in
+                    guard let self, self.player.currentItem === item else { return }
+                    self.refreshPlaybackStatus()
+                }
+            }
             if let old = importedURL { try? FileManager.default.removeItem(at: old) }
             importedURL = destination
             ready = true
@@ -79,22 +97,60 @@ final class PlaybackModel: ObservableObject {
 
     func play() {
         guard ready else { return }
+        if player.currentItem?.status == .failed {
+            refreshPlaybackStatus()
+            return
+        }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .moviePlayback,
                                     policy: .longFormVideo, options: [])
             try session.setActive(true)
-            player.play()
             active = true
-            status = "播放中；請確認接收端有影像，只有聲音不算通過"
+            status = "正在準備播放…"
+            if let duration = player.currentItem?.duration, duration.isNumeric,
+               CMTimeCompare(player.currentTime(), duration) >= 0 {
+                player.seek(to: .zero)
+            }
+            player.play()
+            refreshPlaybackStatus()
         } catch { status = "無法開始播放：\(error.localizedDescription)" }
     }
 
     func pause() {
-        player.pause()
         active = false
         resumeAfterInterruption = false
+        if ready { status = "已暫停" }
+        player.pause()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private func refreshPlaybackStatus() {
+        guard ready, let item = player.currentItem else { return }
+        if item.status == .failed {
+            active = false
+            status = "播放失敗：\(item.error?.localizedDescription ?? "無法讀取影片")"
+            return
+        }
+        switch player.timeControlStatus {
+        case .playing:
+            active = true
+            status = player.isExternalPlaybackActive
+                ? "外部播放中；請確認接收端有影像與聲音"
+                : "手機播放中"
+        case .waitingToPlayAtSpecifiedRate:
+            active = true
+            status = "正在載入或緩衝影片…"
+        case .paused:
+            // Keep more specific stop reasons set by interruption/end/route handlers.
+            if active {
+                active = false
+                status = "已暫停"
+            }
+        @unknown default:
+            active = false
+            status = "播放器狀態尚未確認"
+        }
     }
 
     /// A user-requested local snapshot, not proof of receiver decoding or vehicle sync.
@@ -150,5 +206,7 @@ final class PlaybackModel: ObservableObject {
     deinit {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         externalObserver?.invalidate()
+        timeControlObserver?.invalidate()
+        itemStatusObserver?.invalidate()
     }
 }

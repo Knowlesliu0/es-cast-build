@@ -67,7 +67,9 @@ struct ContentView: View {
                         Button("暫停", action: playback.pause)
                         Spacer()
                         AirPlayPicker().frame(width: 44, height: 44)
-                    }.disabled(capture.active || capture.busy)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(capture.active || capture.busy)
                     Text(playback.status)
                     Text(playback.externalPlayback ? "系統回報外部播放中，仍須目視確認車機影像。" : "尚未回報外部影片播放。")
                         .font(.caption).foregroundStyle(.secondary)

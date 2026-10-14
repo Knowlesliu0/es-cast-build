@@ -68,7 +68,9 @@ func verifyLatestPacedSourceImage() async throws {
     let queue = DispatchQueue(label: "tw.escast.last-image-test")
     let writer = LiveHLSWriter(store: store, queue: queue)
     do {
-        _ = try await feedFixture(writer, queue: queue) { sample, index in
+        // Pace audio-driven held frames like a real source instead of filling the
+        // video encoder in an offline burst while waiting only for audio readiness.
+        _ = try await feedFixture(writer, queue: queue, realTime: true) { sample, index in
             if index > 120 { return nil }
             if index != 120 { return sample }
             var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 60),

@@ -27,7 +27,7 @@ def verify(path, source_recovery=False):
         "CFBundleIdentifier": "tw.escast.probe",
         "CFBundleDisplayName": "ES Cast 驗證版",
         "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "10",
+        "CFBundleVersion": "11",
         "MinimumOSVersion": "27.0",
         "UIDeviceFamily": [1],
         "ESCastSourceRecoveryObservation": "YES" if source_recovery else "NO",
