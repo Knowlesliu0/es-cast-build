@@ -1,0 +1,21 @@
+name: Validate source recovery observation policy
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and exercise fixed observation deadline
+        run: |
+          set -euo pipefail
+          swiftc ios/ESCast/SourceRecoveryObservation.swift tests/source-recovery/main.swift -o /tmp/escast-source-recovery
+          /tmp/escast-source-recovery
+      - name: Exercise recovery lifecycle
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library ios/ESCast/SourceRecoveryObservation.swift ios/ESCast/SourceRecoveryCoordinator.swift tests/source-recovery-lifecycle/main.swift -o /tmp/escast-source-recovery-lifecycle
+          /tmp/escast-source-recovery-lifecycle

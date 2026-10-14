@@ -122,7 +122,9 @@ final class CaptureTelemetry: NSObject, SCStreamOutput, @unchecked Sendable {
     func begin() {
         queue.sync {
             started = ProcessInfo.processInfo.systemUptime
-            write(["event": "start", "elapsed": 0,
+            write(["event": "start", "elapsed": 0, "uptime_seconds": started,
+                   "app_build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                   "capture_session_uuid": url.deletingLastPathComponent().lastPathComponent,
                    "screen_status_codes": ["complete": SCFrameStatus.complete.rawValue,
                                            "idle": SCFrameStatus.idle.rawValue,
                                            "blank": SCFrameStatus.blank.rawValue,

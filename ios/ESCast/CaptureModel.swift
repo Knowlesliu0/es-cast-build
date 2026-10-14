@@ -13,6 +13,7 @@ final class CaptureModel: NSObject, ObservableObject, SCContentSharingPickerObse
     @Published var saveRecording = false
     @Published var liveStreaming = true
     @Published private(set) var liveReady = false
+    @Published private(set) var liveSessionID: UUID?
     @Published private(set) var liveStatus = "尚未啟動本機串流"
     let playlistURL = URL(string: "http://127.0.0.1:8766/playlist.m3u")!
 
@@ -50,6 +51,7 @@ final class CaptureModel: NSObject, ObservableObject, SCContentSharingPickerObse
             let folder = URL.documentsDirectory.appending(path: "Sessions/\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             sessionFolder = folder
+            liveSessionID = UUID(uuidString: folder.lastPathComponent)
             liveReady = false
             let logger = try CaptureTelemetry(url: folder.appending(path: "capture.jsonl"))
             logger.onSummary = { [weak self, weak logger] text in Task { @MainActor in
@@ -250,6 +252,7 @@ final class CaptureModel: NSObject, ObservableObject, SCContentSharingPickerObse
             } catch { failure = failure ?? error }
         }
         liveServer = nil; liveWriter = nil; sessionFolder = nil
+        liveSessionID = nil
         liveReady = false
         liveStatus = "本機串流已停止"
         // The system finalizes SCRecordingOutput when capture stops. Do not expose an unfinished file.

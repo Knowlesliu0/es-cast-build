@@ -1,0 +1,32 @@
+name: HLS native core tests
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode with iOS 27 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in /Applications/Xcode*.app; do
+            sdk=$(DEVELOPER_DIR="$candidate/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || true)
+            if [[ "$sdk" == 27.* ]]; then
+              echo "DEVELOPER_DIR=$candidate/Contents/Developer" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo 'No iOS 27 SDK found.' >&2
+          exit 1
+      - name: Validate live HLS encoding and loopback
+        run: bash tools/run_hls_native_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: HLS-native-evidence
+          path: artifacts/hls-native-*
+          retention-days: 7

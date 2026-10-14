@@ -40,6 +40,16 @@ jobs:
           xcodegen generate
       - name: Validate live HLS encoding and loopback
         run: bash tools/run_hls_native_tests.sh
+      - name: Validate live relay capture lifecycle
+        run: |
+          set -euo pipefail
+          swiftc ios/ESCast/LiveRelayCaptureGate.swift tests/live-relay-state/main.swift -o "$RUNNER_TEMP/live-relay-state"
+          "$RUNNER_TEMP/live-relay-state"
+      - name: Generate and verify offline car test movie
+        run: |
+          set -euo pipefail
+          python3 tools/make_sync_fixture.py --duration 60 --output ios/CarTestAssets/ESCast-Car-Test-60s.mp4
+          python3 tools/verify_fixture.py ios/CarTestAssets/ESCast-Car-Test-60s.mp4 --pulses 2 30 58 --report offline-car-fixture.json
       - name: Build device app without signing
         run: |
           set -euo pipefail
@@ -117,6 +127,7 @@ jobs:
             recovery-settings.json
             ios-tests.log
             native-test-summary.json
+            offline-car-fixture.json
             ios/TestResults.xcresult
             artifacts/hls-native-*
           retention-days: 7

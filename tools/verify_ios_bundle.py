@@ -27,7 +27,7 @@ def verify(path, source_recovery=False):
         "CFBundleIdentifier": "tw.escast.probe",
         "CFBundleDisplayName": "ES Cast 驗證版",
         "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "11",
+        "CFBundleVersion": "12",
         "MinimumOSVersion": "27.0",
         "UIDeviceFamily": [1],
         "ESCastSourceRecoveryObservation": "YES" if source_recovery else "NO",
@@ -51,6 +51,14 @@ def verify(path, source_recovery=False):
         failures.append("Missing supported orientations")
     if not executable_exists:
         failures.append("Missing app executable")
+    fixture = "CarTestAssets/ESCast-Car-Test-60s.mp4"
+    if path.is_dir():
+        fixture_exists = (path / fixture).is_file() and (path / fixture).stat().st_size > 1024
+    else:
+        with zipfile.ZipFile(path) as archive:
+            fixture_exists = info_path.rsplit("/", 1)[0] + "/" + fixture in archive.namelist()
+    if not fixture_exists:
+        failures.append("Missing offline car test movie")
     return {"bundle_configuration_passed": not failures, "failures": failures,
             "bundle_id": info.get("CFBundleIdentifier"), "sdk": info.get("DTSDKName"),
             "device_playback_verified": False, "vehicle_av_sync_verified": False}

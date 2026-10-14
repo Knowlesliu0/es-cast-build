@@ -4,6 +4,45 @@ import XCTest
 
 final class PlaybackStateTests: XCTestCase {
     @MainActor
+    func testIdleMoviePlayerDoesNotHandleLiveRelayRouteLoss() async throws {
+        let movie = PlaybackModel()
+        let relay = LiveRelayModel()
+        XCTAssertTrue(relay.prepare(), relay.status)
+        defer { relay.stop(reason: "test_cleanup") }
+        let idleStatus = movie.status
+        NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(), userInfo: [
+                AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue
+            ])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(movie.status, idleStatus,
+                       "An idle MP4 player must leave the live relay's route change alone")
+        XCTAssertTrue(relay.armed)
+    }
+
+    @MainActor
+    func testBuiltInCarMovieLoadsSixtySecondsOfVideoAndAudio() async throws {
+        let model = PlaybackModel()
+        model.loadCarTestMovie()
+        defer { model.pause() }
+        let item = try XCTUnwrap(model.player.currentItem, model.status)
+        let duration = try await item.asset.load(.duration)
+        let video = try await item.asset.loadTracks(withMediaType: .video)
+        let audio = try await item.asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 60, accuracy: 0.1)
+        XCTAssertFalse(video.isEmpty)
+        XCTAssertFalse(audio.isEmpty)
+        model.play()
+        let deadline = Date().addingTimeInterval(5)
+        while model.player.currentTime().seconds < 0.15, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(item.status, .readyToPlay)
+        XCTAssertGreaterThan(model.player.currentTime().seconds, 0.1,
+                             "The bundled resource must advance the real AVPlayer clock")
+    }
+
+    @MainActor
     func testPauseDoesNotKeepClaimingPlaybackIsRunning() throws {
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")

@@ -9,7 +9,7 @@ settings:
     SWIFT_STRICT_CONCURRENCY: targeted
     TARGETED_DEVICE_FAMILY: '1'
     CODE_SIGN_STYLE: Automatic
-    CURRENT_PROJECT_VERSION: 11
+    CURRENT_PROJECT_VERSION: 12
     MARKETING_VERSION: 0.1.0
     ESCAST_DISPLAY_NAME: ES Cast 驗證版
     ESCAST_SOURCE_RECOVERY: NO
@@ -21,6 +21,9 @@ targets:
       - path: ESCast
         excludes:
           - Info.plist
+      - path: CarTestAssets
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: tw.escast.probe
@@ -34,13 +37,16 @@ targets:
       - path: ESCast
         excludes:
           - Info.plist
+      - path: CarTestAssets
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: tw.escast.source-recovery
         TARGETED_DEVICE_FAMILY: '1'
         INFOPLIST_FILE: ESCast/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        CURRENT_PROJECT_VERSION: 11
+        CURRENT_PROJECT_VERSION: 12
         ESCAST_DISPLAY_NAME: ES Cast 來源觀察
         ESCAST_SOURCE_RECOVERY: YES
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SOURCE_RECOVERY_OBSERVATION
@@ -50,9 +56,14 @@ targets:
     sources:
       - ESCastTestHost
       - ESCast/PlaybackModel.swift
+      - ESCast/LiveRelayModel.swift
+      - ESCast/LiveRelayCaptureGate.swift
       - ESCast/HLS
       - ESCast/LiveHLSWriter.swift
       - ESCast/LocalHLSServer.swift
+      - path: CarTestAssets
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: tw.escast.playback-test-host

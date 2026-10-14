@@ -69,6 +69,15 @@ final class PlaybackModel: ObservableObject {
         })
     }
 
+    func loadCarTestMovie() {
+        guard let url = Bundle.main.url(forResource: "ESCast-Car-Test-60s", withExtension: "mp4",
+                                        subdirectory: "CarTestAssets") else {
+            status = "內建測試影片未找到；可先匯入自己的影片"
+            return
+        }
+        importMovie(.success([url]))
+    }
+
     func importMovie(_ result: Result<[URL], Error>) {
         do {
             guard let source = try result.get().first else { return }
@@ -174,6 +183,8 @@ final class PlaybackModel: ObservableObject {
                 "player_time_seconds": time.isFinite ? time : NSNull(),
                 "route_sharing_policy": session.routeSharingPolicy.rawValue,
                 "audio_category": session.category.rawValue,
+                "audio_mode": session.mode.rawValue,
+                "audio_category_options": session.categoryOptions.rawValue,
                 "audio_outputs": session.currentRoute.outputs.map { $0.portType.rawValue },
                 "error_domain": itemError?.domain ?? "",
                 "error_code": itemError?.code ?? 0,
