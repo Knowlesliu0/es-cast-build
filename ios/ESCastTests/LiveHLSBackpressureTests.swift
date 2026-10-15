@@ -74,10 +74,148 @@ final class LiveHLSBackpressureTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(elapsed, 0.45,
                                        "A single unready result must not terminate capture immediately")
             XCTAssertLessThan(elapsed, 1.5)
+            let pressureAge = try XCTUnwrap(failure.userInfo["backpressure_retry_age_seconds"] as? Double)
+            XCTAssertGreaterThanOrEqual(pressureAge, 0.45)
+            XCTAssertLessThan(pressureAge, 1,
+                              "Scheduling tolerance must not become an unbounded retry policy")
+            let diagnostic = writer.diagnostic()
+            let videoPTS = try XCTUnwrap(diagnostic["last_encoded_video_pts"] as? Double)
+            let audioPTS = try XCTUnwrap(diagnostic["last_audio_pts"] as? Double)
+            XCTAssertLessThanOrEqual(audioPTS - videoPTS, 0.5 + 0.000001,
+                                    "Do not keep accepting audio beyond the held-video lag budget")
             XCTAssertEqual(writer.diagnostic()["held_video_recoveries"] as? Int, 0)
             XCTAssertGreaterThan(writer.diagnostic()["held_video_deferrals"] as? Int ?? 0, 1)
             try? await writer.finish()
             XCTAssertEqual(writer.diagnostic()["retained_source_images"] as? Int, 0)
+        } catch {
+            try? await writer.finish()
+            throw error
+        }
+    }
+
+    func testSourceVideoPressureStillFailsOnTheFirstAppend() async throws {
+        try await verifyImmediatePressure(.video, expectedInput: "source_video")
+    }
+
+    func testAudioPressureStillFailsOnTheFirstAppend() async throws {
+        try await verifyImmediatePressure(.audio, expectedInput: "audio")
+    }
+
+    func testSourceImageWithinPressureBudgetRecoversWithoutMovingItsTimestamp() async throws {
+        try await verifySourceDuringHeldPressure(expired: false)
+    }
+
+    func testSourceImageCannotEraseAnExpiredHeldPressureBudget() async throws {
+        try await verifySourceDuringHeldPressure(expired: true)
+    }
+
+    func testPartialHeldProgressDoesNotResetTheOriginalPressureBudget() async throws {
+        let queue = DispatchQueue(label: "tw.escast.partial-held-pressure-test")
+        let source = try SyntheticLiveMediaSource()
+        var allowance: Int?
+        let writer = LiveHLSWriter(store: HLSStore(), queue: queue) { input in
+            guard input.isReadyForMoreMediaData else { return false }
+            guard input.mediaType == .video, let remaining = allowance else { return true }
+            guard remaining > 0 else { return false }
+            allowance = remaining - 1
+            return true
+        }
+        do {
+            try await prime(writer, source: source, queue: queue)
+            queue.sync { allowance = 0 }
+            for index in 1...6 {
+                try await appendAudio(index, source: source, writer: writer, queue: queue)
+            }
+            var observed: NSError?
+            for index in 7...30 {
+                // One held frame per callback makes partial progress but never
+                // catches the existing backlog. Its deadline must remain unchanged.
+                queue.sync { allowance = 1 }
+                do { try await appendAudio(index, source: source, writer: writer, queue: queue) }
+                catch { observed = error as NSError; break }
+            }
+            let failure = try XCTUnwrap(observed, "Partial writes must not buy a new pressure budget")
+            XCTAssertEqual(failure.domain, "ESCast.HLS")
+            XCTAssertEqual(failure.code, 14)
+            XCTAssertEqual(failure.userInfo["backpressure_input"] as? String, "held_video")
+            let pressureAge = try XCTUnwrap(failure.userInfo["backpressure_retry_age_seconds"] as? Double)
+            XCTAssertGreaterThanOrEqual(pressureAge, 0.5)
+            XCTAssertLessThan(pressureAge, 1)
+            XCTAssertGreaterThan(writer.diagnostic()["held_video_frames"] as? Int ?? 0, 0,
+                                 "The test must actually append held frames between refusals")
+            XCTAssertEqual(writer.diagnostic()["held_video_recoveries"] as? Int, 0)
+            try? await writer.finish()
+        } catch {
+            try? await writer.finish()
+            throw error
+        }
+    }
+
+    private func verifySourceDuringHeldPressure(expired: Bool) async throws {
+        let queue = DispatchQueue(label: "tw.escast.source-held-budget-test")
+        let source = try SyntheticLiveMediaSource()
+        var blockVideo = false
+        let writer = LiveHLSWriter(store: HLSStore(), queue: queue) { input in
+            input.isReadyForMoreMediaData && !(blockVideo && input.mediaType == .video)
+        }
+        do {
+            try await prime(writer, source: source, queue: queue)
+            queue.sync { blockVideo = true }
+            for index in 1...2 {
+                try await appendAudio(index, source: source, writer: writer, queue: queue)
+            }
+            XCTAssertGreaterThan(writer.diagnostic()["held_video_deferrals"] as? Int ?? 0, 0)
+            if expired { try await Task.sleep(nanoseconds: 550_000_000) }
+            queue.sync { blockVideo = false }
+            let pair = try source.samplePair(frameIndex: 3)
+            if expired {
+                XCTAssertThrowsError(try queue.sync { try writer.append(pair.0, type: .video) }) { error in
+                    let failure = error as NSError
+                    XCTAssertEqual(failure.domain, "ESCast.HLS")
+                    XCTAssertEqual(failure.code, 14)
+                    XCTAssertEqual(failure.userInfo["backpressure_input"] as? String, "held_video")
+                }
+                XCTAssertEqual(writer.diagnostic()["video_samples"] as? Int, 1)
+                XCTAssertEqual(writer.diagnostic()["held_video_recoveries"] as? Int, 0)
+            } else {
+                try queue.sync { try writer.append(pair.0, type: .video) }
+                XCTAssertEqual(writer.diagnostic()["video_samples"] as? Int, 2)
+                XCTAssertEqual(writer.diagnostic()["held_video_recoveries"] as? Int, 1)
+                XCTAssertEqual(try XCTUnwrap(writer.diagnostic()["last_encoded_video_pts"] as? Double),
+                               0.1, accuracy: 0.000001)
+                XCTAssertEqual(try XCTUnwrap(writer.diagnostic()["last_audio_pts"] as? Double),
+                               2.0 / 30.0, accuracy: 0.000001)
+            }
+            try? await writer.finish()
+        } catch {
+            try? await writer.finish()
+            throw error
+        }
+    }
+
+    private func verifyImmediatePressure(_ type: AVMediaType, expectedInput: String) async throws {
+        let queue = DispatchQueue(label: "tw.escast.source-pressure-test")
+        let source = try SyntheticLiveMediaSource()
+        var blocked: AVMediaType?
+        let writer = LiveHLSWriter(store: HLSStore(), queue: queue) { input in
+            input.isReadyForMoreMediaData && input.mediaType != blocked
+        }
+        do {
+            try await prime(writer, source: source, queue: queue)
+            let pair = try source.samplePair(frameIndex: 1)
+            queue.sync { blocked = type }
+            XCTAssertThrowsError(try queue.sync {
+                try writer.append(type == .video ? pair.0 : pair.1, type: type)
+            }) { error in
+                let failure = error as NSError
+                XCTAssertEqual(failure.domain, "ESCast.HLS")
+                XCTAssertEqual(failure.code, 14)
+                XCTAssertEqual(failure.userInfo["backpressure_input"] as? String, expectedInput)
+            }
+            XCTAssertEqual(writer.diagnostic()["audio_samples"] as? Int, 1)
+            XCTAssertEqual(writer.diagnostic()["video_samples"] as? Int, 1)
+            XCTAssertEqual(writer.diagnostic()["held_video_deferrals"] as? Int ?? 0, 0)
+            try? await writer.finish()
         } catch {
             try? await writer.finish()
             throw error

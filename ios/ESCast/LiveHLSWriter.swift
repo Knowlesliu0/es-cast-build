@@ -34,6 +34,10 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
     private var audioCount = 0
     private var pacedFrames = 0
     private var heldFrames = 0
+    private var heldVideoPressureStarted: DispatchTime?
+    private var heldVideoDeferrals = 0
+    private var heldVideoRecoveries = 0
+    private let heldVideoPressureBudget = 0.5
     var onFailure: ((Error) -> Void)?
     var onSummary: ((String) -> Void)?
 
@@ -204,7 +208,9 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
         let interval = CMTime(value: 1, timescale: heldFrameRate)
         let limit = CMTimeSubtract(audioPTS, interval)
         var count = 0
+        try checkHeldVideoPressure(audioPTS: audioPTS, nextPTS: CMTimeAdd(previous, interval))
         while CMTimeCompare(CMTimeAdd(previous, interval), limit) <= 0 {
+            try checkHeldVideoPressure(audioPTS: audioPTS, nextPTS: CMTimeAdd(previous, interval))
             guard count < maximumFrames else {
                 throw sourceTimeout(trigger: "audio_timeline_jump", incomingPTS: audioPTS, incomingType: .audio)
             }
@@ -216,13 +222,63 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
                 sampleBuffer: source, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
                 sampleBufferOut: &held)
             guard status == noErr, let held else { throw error("無法維持靜態畫面") }
-            try write(held, type: .video, isHeld: true)
+            guard try write(held, type: .video, isHeld: true) else {
+                // Retain only the existing source image. The next audio callback
+                // retries this original video slot; audio itself is never queued or dropped.
+                try checkHeldVideoPressure(audioPTS: audioPTS, nextPTS: next)
+                return
+            }
             previous = next
             count += 1
         }
+        recoverHeldVideoPressure()
     }
 
-    private func write(_ sample: CMSampleBuffer, type: AVMediaType, isHeld: Bool = false) throws {
+    private func checkHeldVideoPressure(audioPTS: CMTime, nextPTS: CMTime) throws {
+        guard let began = heldVideoPressureStarted, let lastVideo else { return }
+        let age = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1_000_000_000
+        let gap = CMTimeGetSeconds(CMTimeSubtract(audioPTS, lastVideo))
+        guard age < heldVideoPressureBudget, gap <= heldVideoPressureBudget else {
+            throw backpressure(nextPTS, type: .video, isHeld: true,
+                               selectedReady: videoInput.map(inputIsReady), audioPTS: audioPTS)
+        }
+    }
+
+    private func recoverHeldVideoPressure() {
+        guard heldVideoPressureStarted != nil else { return }
+        heldVideoRecoveries += 1
+        heldVideoPressureStarted = nil
+    }
+
+    private func backpressure(_ pts: CMTime, type: AVMediaType, isHeld: Bool,
+                              selectedReady: Bool?, audioPTS: CMTime? = nil) -> NSError {
+        let now = DispatchTime.now().uptimeNanoseconds
+        func age(_ arrival: DispatchTime?) -> Any {
+            guard let arrival else { return NSNull() }
+            return Double(now - arrival.uptimeNanoseconds) / 1_000_000_000
+        }
+        let seconds = CMTimeGetSeconds(pts)
+        let videoReady = type == .video ? selectedReady : videoInput.map(inputIsReady)
+        let audioReady = type == .audio ? selectedReady : audioInput.map(inputIsReady)
+        let pendingGap = audioPTS.flatMap { audio in
+            lastVideo.map { CMTimeGetSeconds(CMTimeSubtract(audio, $0)) }
+        }
+        return NSError(domain: "ESCast.HLS", code: 14, userInfo: [
+            NSLocalizedDescriptionKey: "即時編碼無法及時接收影音",
+            "backpressure_input": type == .video ? (isHeld ? "held_video" : "source_video") : "audio",
+            "backpressure_pts_seconds": seconds.isFinite ? seconds : NSNull(),
+            "backpressure_video_ready": videoReady.map { $0 as Any } ?? NSNull(),
+            "backpressure_audio_ready": audioReady.map { $0 as Any } ?? NSNull(),
+            "backpressure_video_arrival_age_seconds": age(lastVideoArrival),
+            "backpressure_audio_arrival_age_seconds": age(lastAudioArrival),
+            "backpressure_retry_age_seconds": age(heldVideoPressureStarted),
+            "backpressure_pending_video_gap_seconds": pendingGap.map { $0 as Any } ?? NSNull(),
+            "backpressure_uptime_seconds": ProcessInfo.processInfo.systemUptime
+        ])
+    }
+
+    @discardableResult
+    private func write(_ sample: CMSampleBuffer, type: AVMediaType, isHeld: Bool = false) throws -> Bool {
         guard let writer, writer.status == .writing else { throw self.writer?.error ?? error("影音編碼已中止") }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         // Screen updates may be sparse while audio advances. Their most recent
@@ -248,7 +304,7 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
             // Select at most one frame per 30Hz slot; preserve the source PTS unchanged.
             let position = CMTimeAdd(elapsed, CMTime(value: 1, timescale: 120))
             let slot = CMTimeConvertScale(position, timescale: 30, method: .roundTowardZero).value
-            if let previous = lastVideoSlot, slot <= previous { pacedFrames += 1; return }
+            if let previous = lastVideoSlot, slot <= previous { pacedFrames += 1; return true }
             videoSlot = slot
         }
         if type == .audio, let previous = lastAudio, CMTimeCompare(pts, previous) <= 0 {
@@ -256,25 +312,19 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
         }
         let input = type == .video ? videoInput : audioInput
         let selectedReady = input.map(inputIsReady)
-        guard let input, selectedReady == true else {
-            let now = DispatchTime.now().uptimeNanoseconds
-            func age(_ arrival: DispatchTime?) -> Any {
-                guard let arrival else { return NSNull() }
-                return Double(now - arrival.uptimeNanoseconds) / 1_000_000_000
+        guard let input else {
+            throw backpressure(pts, type: type, isHeld: isHeld, selectedReady: selectedReady)
+        }
+        guard selectedReady == true else {
+            if type == .video, isHeld {
+                if heldVideoPressureStarted == nil { heldVideoPressureStarted = .now() }
+                heldVideoDeferrals += 1
+                return false
             }
-            let seconds = CMTimeGetSeconds(pts)
-            let videoReady = type == .video ? selectedReady : videoInput?.isReadyForMoreMediaData
-            let audioReady = type == .audio ? selectedReady : audioInput?.isReadyForMoreMediaData
-            throw NSError(domain: "ESCast.HLS", code: 14, userInfo: [
-                NSLocalizedDescriptionKey: "即時編碼無法及時接收影音",
-                "backpressure_input": type == .video ? (isHeld ? "held_video" : "source_video") : "audio",
-                "backpressure_pts_seconds": seconds.isFinite ? seconds : NSNull(),
-                "backpressure_video_ready": videoReady.map { $0 as Any } ?? NSNull(),
-                "backpressure_audio_ready": audioReady.map { $0 as Any } ?? NSNull(),
-                "backpressure_video_arrival_age_seconds": age(lastVideoArrival),
-                "backpressure_audio_arrival_age_seconds": age(lastAudioArrival),
-                "backpressure_uptime_seconds": ProcessInfo.processInfo.systemUptime
-            ])
+            throw backpressure(pts, type: type, isHeld: isHeld, selectedReady: selectedReady)
+        }
+        if type == .video, !isHeld {
+            try checkHeldVideoPressure(audioPTS: lastAudio ?? pts, nextPTS: pts)
         }
         let shifted = try retime(sample)
         guard input.append(shifted) else { throw writer.error ?? error("無法寫入影音樣本") }
@@ -283,8 +333,10 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
             if isHeld { heldFrames += 1 }
             if videoGridOrigin == nil { videoGridOrigin = pts }
             lastVideoSlot = videoSlot
+            if !isHeld { recoverHeldVideoPressure() }
         }
         else { lastAudio = pts; audioCount += 1 }
+        return true
     }
 
     private func retime(_ sample: CMSampleBuffer) throws -> CMSampleBuffer {
@@ -386,11 +438,15 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
             var result: [String: Any] = ["video_samples": videoCount, "audio_samples": audioCount,
                 "paced_video_frames": pacedFrames, "produced_segments": store.producedSegmentCount,
                 "held_video_frames": heldFrames,
+                "held_video_deferrals": heldVideoDeferrals,
+                "held_video_recoveries": heldVideoRecoveries,
                 "encoded_source_video_frames": videoCount - heldFrames,
                 "retained_source_images": lastSourceImage == nil ? 0 : 1,
                 "retained_segments": store.retainedSegmentCount, "completed": completed,
                 "vehicle_av_sync_verified": false]
             if let origin { result["shared_origin_seconds"] = CMTimeGetSeconds(origin) }
+            if let lastVideo { result["last_encoded_video_pts"] = CMTimeGetSeconds(lastVideo) }
+            if let lastAudio { result["last_audio_pts"] = CMTimeGetSeconds(lastAudio) }
             if let lastSourceVideoPTS { result["last_source_video_pts"] = CMTimeGetSeconds(lastSourceVideoPTS) }
             if let lastVideoArrival {
                 let age = Double(DispatchTime.now().uptimeNanoseconds - lastVideoArrival.uptimeNanoseconds) / 1_000_000_000
@@ -404,7 +460,8 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
                 if native.domain == "ESCast.HLS", native.code == 14 {
                     for key in ["backpressure_input", "backpressure_pts_seconds", "backpressure_video_ready",
                                 "backpressure_audio_ready", "backpressure_video_arrival_age_seconds",
-                                "backpressure_audio_arrival_age_seconds", "backpressure_uptime_seconds"] {
+                                "backpressure_audio_arrival_age_seconds", "backpressure_uptime_seconds",
+                                "backpressure_retry_age_seconds", "backpressure_pending_video_gap_seconds"] {
                         if let value = native.userInfo[key] { result[key] = value }
                     }
                 }
