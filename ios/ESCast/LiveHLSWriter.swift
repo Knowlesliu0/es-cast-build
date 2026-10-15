@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
     let store: HLSStore
     private let queue: DispatchQueue
+    private let inputIsReady: (AVAssetWriterInput) -> Bool
     private let failureLock = NSLock()
     private var failure: Error?
     private var writer: AVAssetWriter?
@@ -36,8 +37,10 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
     var onFailure: ((Error) -> Void)?
     var onSummary: ((String) -> Void)?
 
-    init(store: HLSStore, queue: DispatchQueue) {
+    init(store: HLSStore, queue: DispatchQueue,
+         inputIsReady: @escaping (AVAssetWriterInput) -> Bool = { $0.isReadyForMoreMediaData }) {
         self.store = store; self.queue = queue
+        self.inputIsReady = inputIsReady
         super.init()
     }
 
@@ -117,7 +120,8 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
     func isReadyFor(_ type: AVMediaType) -> Bool {
         if currentFailure() != nil { return true } // append reports the original failure.
         guard writer != nil else { return true }
-        return (type == .video ? videoInput : audioInput)?.isReadyForMoreMediaData ?? false
+        guard let input = type == .video ? videoInput : audioInput else { return false }
+        return inputIsReady(input)
     }
 
     func append(_ sample: CMSampleBuffer, type: AVMediaType) throws {
@@ -251,7 +255,7 @@ final class LiveHLSWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendable 
             throw error("音訊時間倒退或重複", code: 13)
         }
         let input = type == .video ? videoInput : audioInput
-        let selectedReady = input?.isReadyForMoreMediaData
+        let selectedReady = input.map(inputIsReady)
         guard let input, selectedReady == true else {
             let now = DispatchTime.now().uptimeNanoseconds
             func age(_ arrival: DispatchTime?) -> Any {

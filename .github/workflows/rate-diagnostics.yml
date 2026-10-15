@@ -1,4 +1,4 @@
-name: Validate relay rate-change diagnostics
+name: Validate relay diagnostics and held-video backpressure
 on:
   workflow_dispatch:
   push:
@@ -6,6 +6,8 @@ on:
       - '.github/workflows/rate-diagnostics.yml'
       - 'ios/ESCast/LiveRelayModel.swift'
       - 'ios/ESCastTests/LiveRelayLifecycleTests.swift'
+      - 'ios/ESCast/LiveHLSWriter.swift'
+      - 'ios/ESCastTests/LiveHLSBackpressureTests.swift'
 permissions:
   contents: read
 jobs:
@@ -43,6 +45,7 @@ jobs:
             -configuration Debug -derivedDataPath ios/rate-diagnostics-build \
             -parallel-testing-enabled NO -resultBundlePath ios/RateDiagnostics.xcresult \
             -only-testing:ESCastTests/LiveRelayLifecycleTests \
+            -only-testing:ESCastTests/LiveHLSBackpressureTests \
             -collect-test-diagnostics never CODE_SIGNING_ALLOWED=NO test | tee rate-diagnostics.log
       - name: Export test summary
         if: always()
